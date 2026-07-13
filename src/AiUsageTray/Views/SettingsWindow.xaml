@@ -1,0 +1,96 @@
+<Window x:Class="AiUsageTray.Views.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:AiUsageTray.ViewModels"
+        xmlns:views="clr-namespace:AiUsageTray.Views"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        mc:Ignorable="d"
+        d:DataContext="{d:DesignInstance vm:SettingsViewModel}"
+        Title="AI Usage Tray — Settings" Height="560" Width="560"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource Brush.WindowBackground}">
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+        <views:ErrorBoolToBrushConverter x:Key="ErrorBoolToBrush"/>
+    </Window.Resources>
+    <TabControl x:Name="MainTabControl" Margin="12">
+        <TabItem Header="General">
+            <StackPanel Margin="16">
+                <CheckBox Content="Start with Windows" IsChecked="{Binding StartWithWindows}" Margin="0,8"/>
+                <CheckBox Content="Start minimized to the tray" IsChecked="{Binding StartMinimized}" Margin="0,8"/>
+
+                <TextBlock Text="Theme" Margin="0,12,0,4"/>
+                <ComboBox ItemsSource="{Binding ThemeOptions}" SelectedItem="{Binding Theme}" Width="200" HorizontalAlignment="Left"/>
+
+                <TextBlock Text="Time display" Margin="0,12,0,4"/>
+                <ComboBox ItemsSource="{Binding TimeDisplayOptions}" SelectedItem="{Binding TimeDisplay}" Width="200" HorizontalAlignment="Left"/>
+
+                <TextBlock Text="Refresh interval (seconds, providers that support polling)" Margin="0,12,0,4"/>
+                <TextBox Text="{Binding RefreshIntervalSeconds}" Width="100" HorizontalAlignment="Left"/>
+
+                <CheckBox Content="Change tray icon appearance above threshold" IsChecked="{Binding IconAlertEnabled}" Margin="0,16,0,8"/>
+                <TextBlock Text="Icon alert threshold (%)" Margin="0,4,0,4"/>
+                <Slider Minimum="50" Maximum="100" Value="{Binding IconAlertThresholdPercent}" Width="240" HorizontalAlignment="Left"/>
+            </StackPanel>
+        </TabItem>
+
+        <TabItem Header="Providers">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <ItemsControl ItemsSource="{Binding Providers}" Margin="16">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate DataType="{x:Type vm:ProviderSettingsRowViewModel}">
+                            <Border BorderBrush="{DynamicResource Brush.Border}" BorderThickness="0,0,0,1" Padding="0,10">
+                                <StackPanel>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding DisplayName}" FontWeight="Bold" FontSize="14"/>
+                                        <CheckBox Grid.Column="1" Content="Enabled" IsChecked="{Binding Enabled}"/>
+                                    </Grid>
+                                    <TextBlock Text="{Binding ConnectionStatusText}" FontSize="12.5" FontWeight="SemiBold" Margin="0,4,0,0"
+                                               Foreground="{Binding ConnectionHasError, Converter={StaticResource ErrorBoolToBrush}}"/>
+                                    <TextBlock Text="{Binding DetectionStatus}" Margin="0,2,0,0" FontSize="12" Opacity="0.85"/>
+                                    <TextBlock Text="{Binding ExecutablePath, StringFormat='Path: {0}'}" FontSize="11" Opacity="0.75"/>
+                                    <TextBlock Text="{Binding Version, StringFormat='Version: {0}'}" FontSize="11" Opacity="0.75"/>
+                                    <TextBlock Text="{Binding DataSource, StringFormat='Data source: {0}'}" FontSize="11" Opacity="0.75"/>
+                                    <TextBlock Text="{Binding LastMessage}" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0"
+                                                Visibility="{Binding SupportsClaudeSetup, Converter={StaticResource BoolToVis}}">
+                                        <Button Content="Setup" Command="{Binding SetupCommand}" Margin="0,0,8,0" Padding="10,4"/>
+                                        <Button Content="Repair integration" Command="{Binding RepairCommand}" Margin="0,0,8,0" Padding="10,4"/>
+                                        <Button Content="Remove integration" Command="{Binding RemoveCommand}" Padding="10,4"/>
+                                    </StackPanel>
+                                    <StackPanel Margin="0,10,0,0"
+                                                Visibility="{Binding IsGitHubCopilot, Converter={StaticResource BoolToVis}}">
+                                        <TextBlock Text="GitHub username" FontSize="11" Opacity="0.75"/>
+                                        <TextBox Text="{Binding GitHubUsername, UpdateSourceTrigger=PropertyChanged}" Width="220" HorizontalAlignment="Left" Margin="0,2,0,6"/>
+                                        <TextBlock Text="Fine-grained token (Plan: read)" FontSize="11" Opacity="0.75"/>
+                                        <PasswordBox x:Name="GitHubTokenBox" Width="220" HorizontalAlignment="Left" Margin="0,2,0,6"/>
+                                        <Button Content="Add &amp; Authenticate" Padding="10,4" HorizontalAlignment="Left"
+                                                Tag="{Binding ElementName=GitHubTokenBox}"
+                                                Click="OnSaveGitHubCredentialsClick"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </TabItem>
+
+        <TabItem Header="Diagnostics">
+            <StackPanel Margin="16">
+                <TextBox Text="{Binding DiagnosticsSummary, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap"
+                         BorderThickness="0" Background="Transparent" FontFamily="Consolas"/>
+                <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                    <Button Content="Refresh" Command="{Binding RefreshDiagnosticsCommand}" Padding="10,4" Margin="0,0,8,0"/>
+                    <Button Content="Open log folder" Command="{Binding OpenLogFolderCommand}" Padding="10,4" Margin="0,0,8,0"/>
+                    <Button Content="Export sanitized diagnostics…" Command="{Binding ExportDiagnosticsCommand}" Padding="10,4"/>
+                </StackPanel>
+            </StackPanel>
+        </TabItem>
+    </TabControl>
+</Window>
