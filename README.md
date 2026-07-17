@@ -18,7 +18,42 @@ credentials, or sending anything off your machine.
 
 ## Installation
 
-Requires Windows 10/11 and the [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)
+### One-step install (recommended)
+
+Requires Windows 10/11 and the [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0).
+From a clone of this repository, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+```
+
+The script (no admin rights needed — everything is per-user):
+
+1. builds and publishes a Release build,
+2. stops any running AiUsageTray instance,
+3. installs the app to `%LOCALAPPDATA%\Programs\AiUsageTray`,
+4. registers a Scheduled Task named `AiUsageTray` that starts the app automatically at Windows
+   logon (and removes the older Run-key startup entry so the app isn't started twice),
+5. starts the app immediately.
+
+Re-running the script upgrades an existing install in place. Options:
+
+| Option | Effect |
+|---|---|
+| `-SelfContained` | Bundle the .NET runtime (no Desktop Runtime needed afterwards; larger install) |
+| `-InstallDir <path>` | Install somewhere other than `%LOCALAPPDATA%\Programs\AiUsageTray` |
+| `-NoScheduledTask` | Install files only; skip auto-start registration |
+| `-NoStart` | Don't launch the app after installing |
+
+To uninstall (keeps settings/logs unless you add `-PurgeData`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
+```
+
+### Manual install
+
+Requires the [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)
 (unless you use the self-contained publish below).
 
 1. Download or build the app (see **Publishing**).
