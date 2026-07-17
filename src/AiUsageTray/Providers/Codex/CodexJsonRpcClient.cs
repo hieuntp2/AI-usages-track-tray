@@ -256,7 +256,10 @@ public sealed class CodexJsonRpcClient : IAsyncDisposable
         }
         catch (JsonException ex)
         {
-            AppLog.Warn("Codex.JsonRpc", $"Ignoring malformed line: {ex.Message}");
+            // Include a short, redacted prefix of the offending line - "malformed" alone is
+            // undiagnosable. AppLog redacts token-shaped substrings before anything hits disk.
+            var preview = line.Length > 120 ? line[..120] + "…" : line;
+            AppLog.Warn("Codex.JsonRpc", $"Ignoring malformed line ({ex.Message}): {preview}");
             return;
         }
 

@@ -36,8 +36,10 @@ with its live status:
 ## Adding and authenticating a provider
 
 - **Codex** and **Claude Code** don't need credentials from this app - just enable them and make sure
-  you're signed in to their own CLI/app (see the README's Codex/Claude setup sections). Enabling
-  Claude also requires running its one-time bridge Setup.
+  you're signed in to their own CLI/app (see the README's Codex/Claude setup sections). Claude usage
+  updates automatically in the background (the app queries the Claude CLI itself - you don't have to
+  open Claude Code). Running the one-time bridge Setup is still recommended: it adds live per-session
+  metrics (context window, session cost) on top of the quota bars.
 - **GitHub Copilot** is the one provider that needs a credential entered directly here: in
   **Settings → Providers → GitHub Copilot**, enter your GitHub username and a fine-grained personal
   access token (with `Plan: read` permission), then click **Add & Authenticate**. The app immediately
@@ -102,9 +104,21 @@ sharing when reporting an issue.
 
 ## Notifications
 
-Example: *"Codex weekly usage reached 90%. It resets Tuesday at 09:30."*
+Two kinds of Windows notifications, both configurable per provider in Settings:
 
-- Configurable per provider in Settings.
+**Threshold reached** — *"Codex weekly limit reached 90%. It resets Tuesday at 09:30."*
+
 - Fires once per threshold per quota window — not on every background refresh.
-- Claude notifications only fire when a genuinely new cached snapshot arrives (i.e. after you've used
-  Claude Code), never from re-reading the same cache file repeatedly.
+
+**Usage reset** — *"Codex weekly limit has been reset. Usage is now 2%."*
+
+- Fires when a new quota period starts: the window's reset time changes and usage drops, or (for
+  providers that don't report a reset time) usage falls off a cliff after real consumption.
+- Only announced when the previous period actually had meaningful usage (≥10%) — the app won't ping
+  you about "resets" of a window you barely touched, and never on its first sighting of a window
+  (app start, provider newly added).
+- After a reset, the threshold notifications re-arm for the new period.
+
+Claude notifications of either kind fire on genuinely new data only - a fresh bridge snapshot from
+your own Claude Code activity, or a fresh background CLI probe - never from re-reading the same
+cached data repeatedly.

@@ -18,6 +18,10 @@ public sealed class CodexProcessSupervisor : IAsyncDisposable
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(10);
 
+    // One job object for the whole app; intentionally never disposed - the OS closes the handle
+    // when this process ends, which is precisely what triggers kill-on-close for the children.
+    private static readonly Lazy<ChildProcessJob> KillOnExitJob = new(() => new ChildProcessJob());
+
     private readonly string _executablePath;
     private readonly SemaphoreSlim _startLock = new(1, 1);
     private Process? _process;
@@ -86,6 +90,11 @@ public sealed class CodexProcessSupervisor : IAsyncDisposable
         {
             throw new CodexProcessNotRunningException($"Failed to start '{_executablePath} app-server': {ex.Message}");
         }
+
+        // Tie the child's lifetime to ours at the OS level: if this tray app is force-killed or
+        // crashes (paths where Dispose never runs), the job object kills the whole app-server tree
+        // (including the cmd.exe/node.exe shim chain of an npm install) instead of leaking it.
+        KillOnExitJob.Value.TryAssign(process);
 
         _ = ConsumeStderrAsync(process);
 

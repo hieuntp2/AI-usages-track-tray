@@ -47,28 +47,51 @@ running server, the card shows "Update Codex CLI to enable usage monitoring." ra
 
 ## Claude status-line payload contract
 
-**Transport**: Claude Code's `statusLine` mechanism — Claude sends session JSON to the configured
-command's stdin on every status-line refresh. This app never calls Claude Code itself; it only reads
-what the bridge already cached from Claude's own, normal traffic.
+**Transport**: two complementary sources, preferred in this order:
 
-**Fields read** (`Providers/Claude/ClaudeCacheModels.cs`):
+1. **Status-line bridge (passive, free)** — Claude Code's `statusLine` mechanism sends session JSON
+   to the configured command's stdin on every status-line refresh; the bridge caches it. Richest
+   data (quota + context window + session cost), but only updates while the user is actually using
+   Claude Code.
+2. **Headless CLI probe (active fallback)** — whenever the cache is missing, stale (>30 min), has
+   no quota windows yet, or a window's reset time has passed, the provider runs the CLI itself
+   (`ClaudeUsageProbe`), so the card keeps updating even if Claude Code is never opened. See
+   "Headless CLI probe" below.
+
+**Fields read** (`Providers/Claude/ClaudeCacheModels.cs`), verified against the official schema at
+code.claude.com/docs/en/statusline *and* a live capture from Claude Code 2.1.195 through the bridge:
 
 ```
-rate_limits.five_hour.used_percentage
-rate_limits.five_hour.resets_at
+rate_limits.five_hour.used_percentage      number 0-100
+rate_limits.five_hour.resets_at            Unix epoch SECONDS (a JSON number, not an ISO string)
 rate_limits.seven_day.used_percentage
 rate_limits.seven_day.resets_at
-model.id
-model.display_name
-context_window.used_tokens / total_tokens
+model.id / model.display_name
+context_window.total_input_tokens          current context (v2.1.132+; cumulative before that)
+context_window.total_output_tokens
+context_window.context_window_size
+context_window.used_percentage             nullable - precomputed by Claude Code, input-side only
+context_window.remaining_percentage        nullable
+context_window.current_usage               nullable object: input_tokens, output_tokens,
+                                           cache_creation_input_tokens, cache_read_input_tokens
 cost.total_cost_usd
-session_id
-version
+session_id / version
 ```
 
-`rate_limits` may be entirely absent (before the first API response, for unsupported account types,
-non-Pro/Max plans, or older CLI versions) — the provider then reports `SetupRequired` /
-"Waiting for first Claude response" rather than 0%.
+Two traps this integration hit and now guards against:
+
+- `resets_at` is a **Unix-seconds number**. Deserializing it into a string property throws and takes
+  the *entire payload* down with it. `FlexibleTimestampConverter` accepts epoch seconds, epoch
+  milliseconds, and ISO-8601 strings, and turns anything unparsable into null instead of an exception.
+- `context_window` percentages are **null early in a session** (and `current_usage` is null before
+  the first API call / right after `/compact`). Context usage prefers Claude's precomputed
+  `used_percentage` and falls back to `(input + cache_creation + cache_read) / context_window_size`
+  per the documented formula (output tokens excluded); when both are unavailable no metric is shown.
+
+`rate_limits` is only present **for Claude.ai Pro/Max subscribers, and only after the session's first
+API response** — its absence in an otherwise-valid payload is normal, and the card explains that
+("Claude hasn't reported rate limits yet...") instead of rendering an unexplained empty card. Each
+window (`five_hour`, `seven_day`) may also be independently absent.
 
 **Bridge** (`Providers/Claude/Bridge/claude-statusline-bridge.ps1`):
 
@@ -92,9 +115,44 @@ twice detects the bridge is already installed and does nothing further; "Repair 
 re-applies the bridge entry if something else overwrote it; "Remove integration" restores the exact
 original `statusLine` block (or removes the property if none existed) from the recorded metadata.
 
-**Staleness**: if the cached snapshot is older than 30 minutes, the card is marked `Stale`. If a
-window's `resets_at` has already passed with no fresher snapshot since, the UI shows "Limit may have
-reset. Open Claude Code to confirm current usage." instead of inferring 0%.
+**Staleness**: if the cached snapshot is older than 30 minutes, the card is marked `Stale` and the
+CLI probe takes over. If a window's `resets_at` has already passed, the cache view says "Limit may
+have reset. Refreshing from the Claude CLI…" instead of inferring 0%, and the probe fetches the
+post-reset truth.
+
+## Headless CLI probe (`Providers/Claude/ClaudeUsageProbe.cs`)
+
+Verified live against Claude Code 2.1.195 (WinGet native build): with stdin redirected-and-closed
+and stdout piped (no TTY), the CLI renders `/usage` as flat text — one line per window — and exits
+on its own:
+
+```
+claude auth status --json                        → { "loggedIn": true, "subscriptionType": ... }
+claude --safe-mode --ax-screen-reader /usage     → Current session: 16% used · resets Jul 17, 11:30am (Asia/Saigon)
+                                                   Current week (all models): 26% used · resets Jul 20, 11pm (Asia/Saigon)
+                                                   Current week (Fable): 10% used · resets Jul 20, 11pm (Asia/Saigon)
+```
+
+Design constraints, all deliberate:
+
+- **Zero quota cost**: `/usage` is a built-in panel, not a prompt — nothing reaches the model.
+  `auth status` gates the probe so a signed-out CLI surfaces `NotAuthenticated` instead of noise.
+- **`--safe-mode`, not `--bare`**: safe-mode disables hooks/plugins/MCP/CLAUDE.md discovery (the
+  probe must never trigger user customizations) while OAuth subscription auth still works; `--bare`
+  would restrict auth to `ANTHROPIC_API_KEY` and break subscription accounts.
+- **`--ax-screen-reader` doubles as a version gate**: builds too old to support it reject the
+  unknown flag and fail fast (→ `Unsupported`, "update Claude Code" message) *before* anything
+  could be interpreted as a prompt.
+- **Process hygiene**: neutral working directory (`%LOCALAPPDATA%\AiUsageTray`), `NO_COLOR=1`,
+  `DISABLE_AUTOUPDATER=1`, hard timeouts (20s auth / 90s usage) with kill-on-timeout, and the same
+  kill-on-job-close Job Object the Codex supervisor uses, so a hung probe can never outlive the app.
+- **Throttled**: probes are serialized and rate-limited (90s floor between CLI spawns); rapid
+  manual refreshes reuse the last result. The default 300s background poll is unaffected.
+- **Parsing** (`ClaudeUsageOutputParser`) handles both the one-line-per-window headless render and
+  the multi-line interactive panel (ANSI repaints, doubled percentages), maps windows to the same
+  stable ids the bridge uses (`five_hour`, `seven_day`, `weekly_model:<name>`), and never coerces
+  an unreadable percentage to 0. Probe snapshots carry quota windows only (`Source: "claude-cli"`) —
+  context/cost metrics stay bridge-only, because the probe session's own numbers are meaningless.
 
 ## GitHub Copilot research
 

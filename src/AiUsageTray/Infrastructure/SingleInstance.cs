@@ -10,12 +10,20 @@ namespace AiUsageTray.Infrastructure;
 /// </summary>
 public sealed class SingleInstance : IDisposable
 {
-    private const string MutexName = "Local\\AiUsageTray.SingleInstance.Mutex";
+    private const string DefaultMutexName = "Local\\AiUsageTray.SingleInstance.Mutex";
     private const string PipeName = "AiUsageTray.ActivationPipe";
     public const string ActivateMessage = "ACTIVATE";
 
+    private readonly string _mutexName;
     private Mutex? _mutex;
     private CancellationTokenSource? _listenerCts;
+
+    /// <summary>The name override exists for tests only - two mutex handles in one test process must
+    /// not collide with a genuinely running app instance holding the production mutex.</summary>
+    public SingleInstance(string? mutexName = null)
+    {
+        _mutexName = mutexName ?? DefaultMutexName;
+    }
 
     public bool IsPrimaryInstance { get; private set; }
 
@@ -24,7 +32,7 @@ public sealed class SingleInstance : IDisposable
 
     public bool TryAcquire()
     {
-        _mutex = new Mutex(initiallyOwned: true, MutexName, out var createdNew);
+        _mutex = new Mutex(initiallyOwned: true, _mutexName, out var createdNew);
         IsPrimaryInstance = createdNew;
         return createdNew;
     }

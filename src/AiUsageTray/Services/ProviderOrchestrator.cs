@@ -85,6 +85,16 @@ public sealed class ProviderOrchestrator : IDisposable
 
         try
         {
+            // If the last detection didn't fully succeed (CLI missing, or found but its version
+            // couldn't be read), re-probe before refreshing - the user may have installed or
+            // updated the CLI since the app started, and must not need an app restart for that.
+            var detection = _states[provider.Id].Detection;
+            if (detection is null || !detection.IsInstalled || detection.Version is null)
+            {
+                var fresh = await provider.DetectAsync(cancellationToken).ConfigureAwait(false);
+                UpdateState(provider.Id, s => s with { Detection = fresh });
+            }
+
             var snapshot = await provider.RefreshAsync(cancellationToken).ConfigureAwait(false);
             UpdateState(provider.Id, s => s with
             {

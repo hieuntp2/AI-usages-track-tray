@@ -2,16 +2,25 @@ using System.IO;
 using System.IO.Pipelines;
 using System.Text;
 using AiUsageTray.Providers.Codex;
+using AiUsageTray.Tests.TestSupport;
 using Xunit;
 
 namespace AiUsageTray.Tests.Codex;
 
 /// <summary>
 /// Exercises <see cref="CodexJsonRpcClient"/> against in-memory pipes standing in for a child
-/// process's stdin/stdout - no real `codex` process is ever spawned.
+/// process's stdin/stdout - no real `codex` process is ever spawned. Joins the IsolatedAppData
+/// collection because the client logs warnings via AppLog - without redirecting AppPaths, the
+/// malformed-line test would write its fixture string into the REAL app's log file, which once
+/// sent this project on a hunt for a phantom app-server bug.
 /// </summary>
-public class CodexJsonRpcClientTests
+[Collection("IsolatedAppData")]
+public class CodexJsonRpcClientTests : IDisposable
 {
+    private readonly IsolatedAppData _isolated = new();
+
+    public void Dispose() => _isolated.Dispose();
+
     private sealed class Harness : IAsyncDisposable
     {
         public required CodexJsonRpcClient Client { get; init; }

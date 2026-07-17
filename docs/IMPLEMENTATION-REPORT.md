@@ -121,7 +121,51 @@ settings recovery, single-instance mutex semantics.
    fundamentally incompatible with WPF's XAML binding/culture system and was removed. Verified with a
    live smoke-launch of the published Release build - the app now starts, the tray icon appears, and
    it survives multiple refresh cycles with no crash logged.
-5. **`SettingsViewModel` leaked an orchestrator subscription per Settings-window open, and could run
+5. **npm shim layout broke Codex detection entirely** (`Infrastructure/CliLocator.cs`): `where.exe
+   codex` lists the npm global install's *extensionless POSIX shell shim* (for Git Bash) before the
+   runnable `codex.cmd`, and the locator blindly took the first line. Windows can't execute the POSIX
+   shim, so the `--version` probe always failed → "Could not determine Codex CLI version" → the
+   provider showed "Update Codex CLI to enable usage monitoring" forever, regardless of the installed
+   version. Fixed by ranking `where.exe` matches by executable preference (.exe > .com > .cmd > .bat >
+   extensionless last) and probing candidates in order until one answers; the path that actually
+   answered is the one later used to spawn `app-server`. Probe timeout also raised 5s → 15s for
+   node-based .cmd shims on cold start. Verified live: detection now resolves `codex.cmd` and reads
+   `codex-cli 0.144.2`, and the running app spawns a working app-server through it with zero log
+   warnings.
+6. **Detection only ran once at startup** (`Services/ProviderOrchestrator.cs`): installing or
+   updating a CLI while the tray app was running changed nothing until an app restart - which is
+   exactly why "I updated Codex CLI but it still shows the error" happened. `RefreshOneAsync` now
+   re-runs `DetectAsync` before refreshing whenever the previous detection was incomplete (not
+   installed, or version unreadable), so a manual "Refresh now" - or the next background poll - picks
+   up a newly installed/updated CLI.
+7. **Force-killing the tray app leaked the `codex app-server` child tree**
+   (`Infrastructure/ChildProcessJob.cs`): graceful exit killed children via `Dispose`, but taskkill
+   /F, a crash, or logoff skips all managed cleanup - and an npm-based launch leaves a whole
+   `cmd.exe → node.exe → codex.exe` chain running headless. Fixed with a Windows Job Object
+   (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE): every spawned app-server is assigned to the job, and the OS
+   reaps the entire tree the instant the tray process dies, no matter how. Verified live: force-killed
+   the running app and confirmed zero orphaned app-server processes remained.
+8. **Claude `resets_at` would have crashed the whole payload parse**
+   (`Providers/Claude/ClaudeCacheModels.cs`): the official statusline schema (verified against
+   code.claude.com/docs/en/statusline *and* a live bridge capture from Claude Code 2.1.195) sends
+   `rate_limits.*.resets_at` as **Unix epoch seconds - a JSON number** - while the model declared it
+   `string?`. The moment a Pro/Max account's first response populated `rate_limits`, deserialization
+   would throw and the entire cached payload would read as "Invalid JSON". Fixed with
+   `FlexibleTimestampConverter` (accepts epoch seconds, epoch milliseconds, and ISO-8601; unparsable
+   → null, never an exception).
+9. **Claude `context_window` model didn't match reality** (`ClaudeCacheModels.cs`/`ClaudeCacheParser.cs`):
+   the parser expected `used_tokens`/`total_tokens`, but the real fields are `total_input_tokens`,
+   `total_output_tokens`, `context_window_size`, precomputed nullable `used_percentage`/
+   `remaining_percentage`, and a nullable `current_usage` breakdown - so the "Context used" metric
+   never appeared. Rewritten to prefer Claude's own `used_percentage`, falling back to the documented
+   formula `(input + cache_creation + cache_read) / context_window_size` (output tokens excluded).
+   The live-captured session-start payload (all context percentages null, no rate_limits) is now a
+   permanent regression fixture proving nulls stay "unknown" rather than becoming 0%.
+10. **Empty Claude card was unexplained**: a valid payload without `rate_limits` (normal before the
+   session's first API response, and always for non-Pro/Max accounts) rendered a card with no quota
+   bars and no explanation. The card now says "Claude hasn't reported rate limits yet. They appear
+   for Pro/Max accounts after the first response in a session."
+11. **`SettingsViewModel` leaked an orchestrator subscription per Settings-window open, and could run
    provider-row updates off the UI thread**: `orchestrator.StateChanged +=` was previously never
    unsubscribed (each "Open Settings" click added another handler that outlived the window), and the
    handler updated bound `ProviderSettingsRowViewModel` properties directly from whatever background
@@ -131,6 +175,49 @@ settings recovery, single-instance mutex semantics.
    as a field so `SettingsViewModel.Dispose()` can unsubscribe it, and (c) having `App.xaml.cs` reuse a
    single cached `SettingsWindow`/`SettingsViewModel` pair (disposing on `Closed`) instead of
    constructing a new one - and a new background subscription - every time Settings is opened.
+
+## Follow-up features: usage-reset notifications, designed icons
+
+- **Usage-reset notifications** (`Services/NotificationService.cs`): a second notification kind -
+  "*{Provider} {window} has been reset. Usage is now 2%.*" - fires when a new quota period starts,
+  detected either by the window's reset time changing while usage drops, or (for providers that never
+  report `resets_at`) by usage falling ≥30 points after having been ≥10%. First sightings of a window
+  and trivially-used periods never announce, and threshold notifications re-arm for the new period.
+  Six new unit tests cover fire/no-fire cases.
+- **Designed icons** replace the placeholder solid squares: a usage-gauge glyph on a rounded blue
+  badge (red, near-full gauge for the alert variant), rendered per-size from a 16x supersampled
+  master into multi-resolution .ico files (16-256 px), with a simplified thicker-stroke variant for
+  16/20/24 px so the glyph stays legible in the tray. Generated by a reproducible Pillow script;
+  previews in `docs/icon-preview-*.png`.
+
+## Follow-up feature: headless Claude usage probe (no more "open Claude Code to update")
+
+The original Claude integration was purely passive: quota only updated when the user's own Claude
+Code session pushed a status-line payload through the bridge, so the card went stale whenever the
+user simply didn't use Claude Code. Now `ClaudeUsageProvider` falls back to actively probing the CLI
+(`Providers/Claude/ClaudeUsageProbe.cs`) whenever the bridge cache is missing, stale (>30 min),
+quota-bar-less, or past a window's reset time:
+
+- `claude auth status --json` (parsed by `ClaudeAuthStatusParser`) gates on sign-in, then
+  `claude --safe-mode --ax-screen-reader /usage` - run with stdin closed and stdout piped - prints
+  the usage panel as flat one-line-per-window text and exits by itself. No TTY/ConPTY needed, no
+  prompt ever reaches the model, so a probe costs zero quota.
+- `ClaudeUsageOutputParser` gained the single-line format ("Current week (all models): 26% used ·
+  resets Jul 20, 11pm (Zone)") alongside the interactive multi-line/ANSI format; both are covered by
+  fixtures captured from the real CLI (2.1.195). Window ids stay identical to the bridge's
+  (`five_hour`, `seven_day`, `weekly_model:<name>`), so notifications and reset detection work
+  unchanged across both sources.
+- Probes are serialized, rate-limited (90s floor), time-limited (20s/90s with process-tree kill),
+  assigned to a kill-on-close Job Object, and run from a neutral working directory with
+  `NO_COLOR=1` / `DISABLE_AUTOUPDATER=1`. Old CLI builds fail fast on the unknown
+  `--ax-screen-reader` flag and surface "update Claude Code" instead of misbehaving.
+- Fresh bridge snapshots (with actual quota bars) still short-circuit the probe entirely - the
+  passive path remains the cheap, metric-rich preferred source; bridge setup is now an enhancement
+  (context/cost metrics) rather than a prerequisite.
+
+Verified live: with the bridge cache removed and Claude Code closed, the tray app logged
+"CLI usage probe returned 3 quota window(s)" and rendered current 5-hour/weekly/per-model usage on
+its own. 111/111 unit tests pass.
 
 ## Follow-up feature: tray menu provider status + GitHub Copilot authentication UI
 

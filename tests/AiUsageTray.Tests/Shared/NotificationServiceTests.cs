@@ -79,4 +79,87 @@ public class NotificationServiceTests
 
         Assert.Empty(fired);
     }
+
+    [Fact]
+    public void Evaluate_ResetsAtChangesAndUsageDrops_FiresResetNotification()
+    {
+        using var isolated = new IsolatedAppData();
+        var notificationService = new NotificationService(new SettingsService());
+        var fired = new List<NotificationEvent>();
+        notificationService.NotificationRequested += fired.Add;
+
+        notificationService.Evaluate(MakeSnapshot(65, DateTimeOffset.UtcNow.AddHours(1)));
+        fired.Clear();
+
+        // New quota period: reset time moved forward, usage back near zero.
+        notificationService.Evaluate(MakeSnapshot(2, DateTimeOffset.UtcNow.AddHours(6)));
+
+        var reset = Assert.Single(fired, e => e.Title.Contains("reset"));
+        Assert.Contains("has been reset", reset.Message);
+        Assert.Contains("2%", reset.Message);
+    }
+
+    [Fact]
+    public void Evaluate_FirstSighting_DoesNotFireResetNotification()
+    {
+        using var isolated = new IsolatedAppData();
+        var notificationService = new NotificationService(new SettingsService());
+        var fired = new List<NotificationEvent>();
+        notificationService.NotificationRequested += fired.Add;
+
+        // App start / provider newly added: low usage, never seen before - not a reset.
+        notificationService.Evaluate(MakeSnapshot(3, DateTimeOffset.UtcNow.AddHours(2)));
+
+        Assert.DoesNotContain(fired, e => e.Title.Contains("reset"));
+    }
+
+    [Fact]
+    public void Evaluate_ResetsAtChangesButPriorUsageWasTrivial_NoResetNotification()
+    {
+        using var isolated = new IsolatedAppData();
+        var notificationService = new NotificationService(new SettingsService());
+        var fired = new List<NotificationEvent>();
+        notificationService.NotificationRequested += fired.Add;
+
+        notificationService.Evaluate(MakeSnapshot(4, DateTimeOffset.UtcNow.AddHours(1)));
+        notificationService.Evaluate(MakeSnapshot(1, DateTimeOffset.UtcNow.AddHours(6)));
+
+        Assert.DoesNotContain(fired, e => e.Title.Contains("reset"));
+    }
+
+    [Fact]
+    public void Evaluate_SharpUsageDropWithoutResetTimeChange_FiresResetNotification()
+    {
+        using var isolated = new IsolatedAppData();
+        var notificationService = new NotificationService(new SettingsService());
+        var fired = new List<NotificationEvent>();
+        notificationService.NotificationRequested += fired.Add;
+
+        // Some providers never report resets_at - a cliff-drop in usage is the only reset signal.
+        notificationService.Evaluate(MakeSnapshot(80, null));
+        fired.Clear();
+        notificationService.Evaluate(MakeSnapshot(5, null));
+
+        Assert.Single(fired, e => e.Title.Contains("reset"));
+    }
+
+    [Fact]
+    public void Evaluate_ThresholdsCanFireAgainAfterReset()
+    {
+        using var isolated = new IsolatedAppData();
+        var notificationService = new NotificationService(new SettingsService());
+        var fired = new List<NotificationEvent>();
+        notificationService.NotificationRequested += fired.Add;
+
+        var firstWindow = DateTimeOffset.UtcNow.AddHours(1);
+        notificationService.Evaluate(MakeSnapshot(75, firstWindow)); // 70% threshold
+        fired.Clear();
+
+        var secondWindow = DateTimeOffset.UtcNow.AddHours(6);
+        notificationService.Evaluate(MakeSnapshot(2, secondWindow));  // reset
+        notificationService.Evaluate(MakeSnapshot(75, secondWindow)); // 70% again, new period
+
+        Assert.Single(fired, e => e.Title.Contains("reset"));
+        Assert.Single(fired, e => e.Message.Contains("reached 70%"));
+    }
 }

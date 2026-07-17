@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text.Json;
 using AiUsageTray.Models;
 
@@ -67,14 +66,13 @@ public static class ClaudeCacheParser
     {
         var usedPercent = UsageWindow.ClampPercent(window.UsedPercentage);
         decimal? remainingPercent = usedPercent is null ? null : Math.Clamp(100m - usedPercent.Value, 0m, 100m);
-        var resetsAt = ParseIsoTimestamp(window.ResetsAt);
 
         return new UsageWindow(
             Id: id,
             DisplayName: displayName,
             UsedPercent: usedPercent,
             RemainingPercent: remainingPercent,
-            ResetsAt: resetsAt,
+            ResetsAt: window.ResetsAt,
             Duration: null,
             UsedValue: null,
             LimitValue: null,
@@ -90,10 +88,9 @@ public static class ClaudeCacheParser
 
         var metrics = new List<UsageMetric>();
 
-        if (payload.ContextWindow is { UsedTokens: { } used, TotalTokens: { } total } && total > 0)
+        if (ComputeContextUsedPercent(payload.ContextWindow) is { } contextPercent)
         {
-            var percent = Math.Clamp(used * 100m / total, 0m, 100m);
-            metrics.Add(new UsageMetric("context_window", "Context used", percent, "percent"));
+            metrics.Add(new UsageMetric("context_window", "Context used", contextPercent, "percent"));
         }
 
         if (payload.Cost?.TotalCostUsd is { } cost)
@@ -105,22 +102,35 @@ public static class ClaudeCacheParser
     }
 
     /// <summary>
+    /// Context usage percentage: prefers Claude Code's own precomputed `used_percentage` (nullable
+    /// early in a session), falling back to computing input-side tokens / window size the same way
+    /// the docs define it (input + cache-creation + cache-read, output excluded).
+    /// </summary>
+    public static decimal? ComputeContextUsedPercent(ClaudeContextWindow? contextWindow)
+    {
+        if (contextWindow is null)
+        {
+            return null;
+        }
+
+        if (contextWindow.UsedPercentage is { } precomputed)
+        {
+            return Math.Clamp(precomputed, 0m, 100m);
+        }
+
+        if (contextWindow is { CurrentUsage: { } usage, ContextWindowSize: > 0 and { } size })
+        {
+            var inputSideTokens = (usage.InputTokens ?? 0) + (usage.CacheCreationInputTokens ?? 0) + (usage.CacheReadInputTokens ?? 0);
+            return Math.Clamp(inputSideTokens * 100m / size, 0m, 100m);
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// True if any window's reset time has already passed. Callers must not infer 0% usage from
     /// this - the real post-reset value is unknown until a fresh Claude response arrives.
     /// </summary>
     public static bool HasResetTimePassed(IReadOnlyList<UsageWindow> windows, DateTimeOffset now) =>
         windows.Any(w => w.ResetsAt is { } resetsAt && resetsAt < now);
-
-    /// <summary>Never throws; unparsable/missing timestamps become null (unknown), not "now".</summary>
-    public static DateTimeOffset? ParseIsoTimestamp(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-
-        return DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var parsed)
-            ? parsed
-            : null;
-    }
 }
