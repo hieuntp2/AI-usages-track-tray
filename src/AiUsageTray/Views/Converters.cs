@@ -18,7 +18,8 @@ public sealed class LevelToBrushConverter : IValueConverter
             "Warn" => "Brush.Warning",
             "Error" => "Brush.Error",
             "Danger" => "Brush.ProgressDanger",
-            _ => "Brush.Accent",
+            // "Normal" == healthy/connected: a green dot reads as "OK" at a glance.
+            _ => "Brush.Success",
         };
 
         return Application.Current.TryFindResource(key) as Brush ?? Brushes.Gray;

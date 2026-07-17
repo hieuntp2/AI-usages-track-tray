@@ -43,6 +43,14 @@ public sealed partial class ProviderCardViewModel : ObservableObject
     [ObservableProperty]
     private bool _hasMetrics;
 
+    /// <summary>
+    /// True when the provider actually has usage data to show. Unconnected providers (not
+    /// installed, setup required, signed out, never refreshed) are hidden from the flyout
+    /// entirely - their state remains visible in the tray menu and Settings → Providers.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isConnected;
+
     public ObservableCollection<UsageWindowRowViewModel> Windows { get; } = new();
 
     public ObservableCollection<string> Metrics { get; } = new();
@@ -60,6 +68,8 @@ public sealed partial class ProviderCardViewModel : ObservableObject
         var snapshot = state.LastSnapshot;
         if (snapshot is null)
         {
+            IsConnected = false;
+
             var detection = state.Detection;
             if (detection is { IsInstalled: false })
             {
@@ -95,6 +105,10 @@ public sealed partial class ProviderCardViewModel : ObservableObject
             Metrics.Add(FormatMetric(metric));
         }
         HasMetrics = Metrics.Count > 0;
+
+        // "Connected" == there is something real to display. Empty snapshots (NotInstalled,
+        // SetupRequired, NotAuthenticated, errors with no prior data) hide the card.
+        IsConnected = HasWindows || HasMetrics;
     }
 
     private void ApplyStatus(ProviderConnectionStatus status, string? message)
@@ -117,6 +131,8 @@ public sealed partial class ProviderCardViewModel : ObservableObject
     {
         "usd" => $"{metric.DisplayName}: ${metric.Value:0.00}",
         "percent" => $"{metric.DisplayName}: {metric.Value:0}%",
+        // A bare quantity ("2 count") reads like a serialization bug - drop the pseudo-unit.
+        "count" => $"{metric.DisplayName}: {metric.Value:#,0}",
         _ => $"{metric.DisplayName}: {metric.Value:#,0.##} {metric.Unit}",
     };
 

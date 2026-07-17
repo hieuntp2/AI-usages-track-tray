@@ -14,5 +14,9 @@
     <SolidColorBrush x:Key="Brush.Warning" Color="#FFD8A400"/>
     <SolidColorBrush x:Key="Brush.Error" Color="#FFD13438"/>
     <SolidColorBrush x:Key="Brush.ButtonHover" Color="#FFE9E9E9"/>
+    <SolidColorBrush x:Key="Brush.Success" Color="#FF1E9E5A"/>
+    <SolidColorBrush x:Key="Brush.PillBackground" Color="#1A2D6CDF"/>
+    <SolidColorBrush x:Key="Brush.PillText" Color="#FF2D6CDF"/>
+    <SolidColorBrush x:Key="Brush.Separator" Color="#FFEBEBEB"/>
 
 </ResourceDictionary>

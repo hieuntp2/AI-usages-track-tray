@@ -9,6 +9,18 @@ public partial class FlyoutWindow : Window
     {
         InitializeComponent();
         DataContext = viewModel;
+
+        // Bottom-anchored + SizeToContent="Height": whenever content changes the height (cards
+        // appearing after a refresh, rows expanding), the window grows *downward* past the work
+        // area unless the bottom edge is re-pinned. This also finalizes the position on the very
+        // first Show, where any pre-show height is only an estimate.
+        SizeChanged += (_, _) =>
+        {
+            if (IsVisible)
+            {
+                AnchorToTrayCorner();
+            }
+        };
     }
 
     private void OnDeactivated(object? sender, EventArgs e) => Hide();
@@ -21,20 +33,31 @@ public partial class FlyoutWindow : Window
     /// </summary>
     public void ShowNearTray()
     {
-        UpdateLayout();
+        // Before the window has ever been shown, no layout pass has run and ActualHeight is 0 -
+        // positioning with it would hang the whole flyout below the screen. Measure against the
+        // work area (MaxHeight still applies) to get a real content height for the first Show.
+        if (ActualHeight == 0)
+        {
+            Measure(new System.Windows.Size(Width, SystemParameters.WorkArea.Height));
+        }
 
+        AnchorToTrayCorner();
+        Show();
+        Activate();
+    }
+
+    private void AnchorToTrayCorner()
+    {
         var workArea = SystemParameters.WorkArea;
         const double margin = 10;
+        var height = ActualHeight > 0 ? ActualHeight : DesiredSize.Height;
 
         Left = workArea.Right - Width - margin;
-        Top = workArea.Bottom - ActualHeight - margin;
+        Top = workArea.Bottom - height - margin;
 
         if (Top < workArea.Top)
         {
             Top = workArea.Top + margin;
         }
-
-        Show();
-        Activate();
     }
 }

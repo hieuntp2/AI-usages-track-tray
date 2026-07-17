@@ -20,6 +20,11 @@ public sealed partial class FlyoutViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private bool _isRefreshing;
 
+    /// <summary>False when no provider has data to show; the flyout then shows an empty-state
+    /// panel pointing at Settings instead of a column of "not connected" boxes.</summary>
+    [ObservableProperty]
+    private bool _hasConnectedProviders;
+
     public ObservableCollection<ProviderCardViewModel> Providers { get; } = new();
 
     public IAsyncRelayCommand RefreshCommand { get; }
@@ -41,6 +46,8 @@ public sealed partial class FlyoutViewModel : ObservableObject, IDisposable
             Providers.Add(card);
         }
 
+        HasConnectedProviders = Providers.Any(c => c.IsConnected);
+
         _orchestrator.StateChanged += OnStateChanged;
 
         RefreshCommand = new AsyncRelayCommand(RefreshAsync);
@@ -57,6 +64,14 @@ public sealed partial class FlyoutViewModel : ObservableObject, IDisposable
         {
             var card = Providers.FirstOrDefault(c => c.ProviderId == state.Provider.Id);
             card?.UpdateFrom(state, _settingsService.Current.TimeDisplay);
+            HasConnectedProviders = Providers.Any(c => c.IsConnected);
+
+            // Background and startup refreshes count too - the header must never claim
+            // "Never refreshed" while cards below it show fresh data.
+            if (state.LastSnapshot is not null)
+            {
+                LastGlobalRefreshText = $"Last refreshed at {DateTimeOffset.Now:HH:mm:ss}";
+            }
         });
     }
 

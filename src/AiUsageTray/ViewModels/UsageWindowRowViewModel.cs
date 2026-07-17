@@ -13,6 +13,10 @@ public sealed class UsageWindowRowViewModel
 
     public string UsageSummaryText { get; }
 
+    /// <summary>Compact right-aligned value for the row header: "16%" for percentage windows,
+    /// the value summary for count-based windows, "—" when usage is unknown.</summary>
+    public string HeadlineValueText { get; }
+
     public string? ResetText { get; }
 
     public string ProgressLevel { get; } // "Normal" | "Warn" | "Danger" - drives progress bar color in the view.
@@ -27,6 +31,7 @@ public sealed class UsageWindowRowViewModel
             UsedPercentValue = (double)used;
             var remaining = window.RemainingPercent ?? (100m - used);
             UsageSummaryText = $"Used {used:0}% · Remaining {remaining:0}%";
+            HeadlineValueText = $"{used:0}%";
             ProgressLevel = used >= 90 ? "Danger" : used >= 70 ? "Warn" : "Normal";
         }
         else if (window.UsedValue is { } usedValue)
@@ -34,12 +39,14 @@ public sealed class UsageWindowRowViewModel
             HasPercent = false;
             var limitText = window.LimitValue is { } limit ? $" / {limit:0.##}" : string.Empty;
             UsageSummaryText = $"{usedValue:0.##}{limitText} {window.Unit}".Trim();
+            HeadlineValueText = UsageSummaryText;
             ProgressLevel = "Normal";
         }
         else
         {
             HasPercent = false;
             UsageSummaryText = "Usage unknown";
+            HeadlineValueText = "—";
             ProgressLevel = "Normal";
         }
 
