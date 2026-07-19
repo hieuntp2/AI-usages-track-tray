@@ -85,6 +85,15 @@ snapshot** per provider — a failing refresh degrades that provider's card to a
 without touching any other provider's data or blocking the orchestrator itself. Every provider call is
 wrapped in a try/catch that logs and records `LastError` rather than propagating.
 
+`NotificationService` evaluates each provider/window independently and emits only two edge-triggered
+events: usage reaching 100%, or a genuinely observed usage reset. Delivery state is stored in
+`%LOCALAPPDATA%\AiUsageTray\config\notification-state.json` by `NotificationStateStore` using
+`AtomicFile`. The delivered marker is written before the Windows notification is requested, so later
+refreshes and application restarts cannot replay the same event. If persistence fails, the event stays
+pending and silent until a later write succeeds; notification failure never blocks provider refreshes.
+The state file contains only stable provider/window IDs, reset timestamps, last percentages, and
+delivery flags — never credentials, provider payloads, prompts, or transcripts.
+
 ## Refresh lifecycle
 
 - **Codex** — actively polled: on flyout open if data is older than 60 seconds, every 5 minutes in the

@@ -83,9 +83,8 @@ and are always shown as separate cards, never averaged or summed.
 - **Start minimized** — if unchecked, the flyout opens automatically on launch.
 - **Theme** — System / Light / Dark. System follows the Windows 10/11 light/dark setting live.
 - **Refresh interval** — how often actively-polled providers (Codex) refresh in the background.
-- **Notification thresholds** — percentages (default 70/90/100) at which a Windows notification fires,
-  per provider. Each threshold fires at most once per quota window — it resets automatically once the
-  window's reset time passes and a fresh value is observed.
+- **Notifications** — a Windows notification appears only when an AI quota window reaches 100% or
+  when that window genuinely resets. Each event appears once, including across app restarts.
 - **Time display** — relative ("in 2h 14m"), exact ("today at 09:30"), or both.
 - **Icon alert threshold** — the tray icon changes appearance once any enabled provider's highest
   window crosses this percentage.
@@ -104,11 +103,12 @@ sharing when reporting an issue.
 
 ## Notifications
 
-Two kinds of Windows notifications, both configurable per provider in Settings:
+Two kinds of Windows notifications can be enabled or disabled per provider in Settings:
 
-**Threshold reached** — *"Codex weekly limit reached 90%. It resets Tuesday at 09:30."*
+**Limit reached** — *"Codex weekly limit reached 100%. It resets Tuesday at 09:30."*
 
-- Fires once per threshold per quota window — not on every background refresh.
+- Fires only at 100%, once per quota window and quota period. Usage at 70%, 90%, or any value below
+  100% does not create a notification.
 
 **Usage reset** — *"Codex weekly limit has been reset. Usage is now 2%."*
 
@@ -117,8 +117,8 @@ Two kinds of Windows notifications, both configurable per provider in Settings:
 - Only announced when the previous period actually had meaningful usage (≥10%) — the app won't ping
   you about "resets" of a window you barely touched, and never on its first sighting of a window
   (app start, provider newly added).
-- After a reset, the threshold notifications re-arm for the new period.
+- After a confirmed reset, the 100% notification re-arms for the new period.
 
-Claude notifications of either kind fire on genuinely new data only - a fresh bridge snapshot from
-your own Claude Code activity, or a fresh background CLI probe - never from re-reading the same
-cached data repeatedly.
+Delivered events are persisted locally before they are shown. Repeated background refreshes,
+re-reading cached data, and closing/reopening the app never replay the same notification. This rule
+applies to every provider, including Claude bridge snapshots and background CLI probes.
