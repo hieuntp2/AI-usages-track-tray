@@ -24,6 +24,8 @@ public static class AppPaths
 
     public static string SettingsFile => Path.Combine(ConfigDir, "settings.json");
 
+    public static string NotificationStateFile => Path.Combine(ConfigDir, "notification-state.json");
+
     public static string ClaudeBridgeMetadataFile => Path.Combine(ConfigDir, "claude-bridge.json");
 
     public static string ClaudeLatestCacheFile => Path.Combine(DataDir, "claude-latest.json");
