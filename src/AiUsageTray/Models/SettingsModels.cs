@@ -17,8 +17,6 @@ public enum TimeDisplayMode
 public sealed class NotificationThresholds
 {
     public bool Enabled { get; set; } = true;
-
-    public List<int> Percentages { get; set; } = new() { 70, 90, 100 };
 }
 
 public sealed class ProviderSettings

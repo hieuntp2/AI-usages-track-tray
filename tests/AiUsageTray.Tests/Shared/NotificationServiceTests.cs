@@ -1,3 +1,5 @@
+using System.IO;
+using AiUsageTray.Infrastructure;
 using AiUsageTray.Models;
 using AiUsageTray.Services;
 using AiUsageTray.Tests.TestSupport;
@@ -13,56 +15,55 @@ public class NotificationServiceTests
         new[] { new UsageWindow("primary", "5-hour limit", usedPercent, 100 - usedPercent, resetsAt, null, null, null, "percent") },
         Array.Empty<UsageMetric>(), null);
 
-    [Fact]
-    public void Evaluate_CrossingThreshold_FiresOnce()
+    [Theory]
+    [InlineData(70)]
+    [InlineData(90)]
+    [InlineData(99.9)]
+    public void Evaluate_BelowOneHundred_NeverFiresLimitNotification(decimal usage)
     {
         using var isolated = new IsolatedAppData();
-        var settingsService = new SettingsService();
-        var notificationService = new NotificationService(settingsService);
+        var service = new NotificationService(new SettingsService());
         var fired = new List<NotificationEvent>();
-        notificationService.NotificationRequested += fired.Add;
+        service.NotificationRequested += fired.Add;
 
-        var resetsAt = DateTimeOffset.UtcNow.AddHours(3);
-        notificationService.Evaluate(MakeSnapshot(75, resetsAt));
-        notificationService.Evaluate(MakeSnapshot(76, resetsAt)); // still above 70, must not refire
-        notificationService.Evaluate(MakeSnapshot(80, resetsAt));
+        service.Evaluate(MakeSnapshot(usage, DateTimeOffset.UtcNow.AddHours(3)));
 
-        Assert.Single(fired); // only the 70% threshold was newly crossed across these calls
+        Assert.Empty(fired);
     }
 
     [Fact]
-    public void Evaluate_MultipleThresholds_EachFiresOnceInOrder()
+    public void Evaluate_ReachesOneHundred_FiresLimitOnce()
     {
         using var isolated = new IsolatedAppData();
-        var settingsService = new SettingsService();
-        var notificationService = new NotificationService(settingsService);
+        var service = new NotificationService(new SettingsService());
         var fired = new List<NotificationEvent>();
-        notificationService.NotificationRequested += fired.Add;
-
+        service.NotificationRequested += fired.Add;
         var resetsAt = DateTimeOffset.UtcNow.AddHours(3);
-        notificationService.Evaluate(MakeSnapshot(95, resetsAt)); // crosses 70, 90 and 100? no, 95 < 100
 
-        Assert.Equal(2, fired.Count); // 70% and 90% thresholds crossed in one jump
+        service.Evaluate(MakeSnapshot(99, resetsAt));
+        service.Evaluate(MakeSnapshot(100, resetsAt));
+        service.Evaluate(MakeSnapshot(100, resetsAt));
+
+        Assert.Contains("reached 100%", Assert.Single(fired).Message);
     }
 
     [Fact]
-    public void Evaluate_ResetsAtChanges_AllowsRenotification()
+    public void Evaluate_SameFullPeriodAfterServiceRestart_DoesNotRepeat()
     {
         using var isolated = new IsolatedAppData();
-        var settingsService = new SettingsService();
-        var notificationService = new NotificationService(settingsService);
-        var fired = new List<NotificationEvent>();
-        notificationService.NotificationRequested += fired.Add;
+        var resetsAt = DateTimeOffset.UtcNow.AddHours(3);
+        var first = new NotificationService(new SettingsService());
+        var firstEvents = new List<NotificationEvent>();
+        first.NotificationRequested += firstEvents.Add;
+        first.Evaluate(MakeSnapshot(100, resetsAt));
+        Assert.Single(firstEvents);
 
-        var firstWindow = DateTimeOffset.UtcNow.AddHours(3);
-        notificationService.Evaluate(MakeSnapshot(75, firstWindow));
-        Assert.Single(fired);
+        var restarted = new NotificationService(new SettingsService());
+        var restartedEvents = new List<NotificationEvent>();
+        restarted.NotificationRequested += restartedEvents.Add;
+        restarted.Evaluate(MakeSnapshot(100, resetsAt));
 
-        // New quota period starts (resetsAt changes) - the 70% threshold should be able to fire again.
-        var secondWindow = DateTimeOffset.UtcNow.AddHours(8);
-        notificationService.Evaluate(MakeSnapshot(75, secondWindow));
-
-        Assert.Equal(2, fired.Count);
+        Assert.Empty(restartedEvents);
     }
 
     [Fact]
@@ -71,11 +72,11 @@ public class NotificationServiceTests
         using var isolated = new IsolatedAppData();
         var settingsService = new SettingsService();
         settingsService.Update(s => s.GetOrAddProvider("codex").Notifications.Enabled = false);
-        var notificationService = new NotificationService(settingsService);
+        var service = new NotificationService(settingsService);
         var fired = new List<NotificationEvent>();
-        notificationService.NotificationRequested += fired.Add;
+        service.NotificationRequested += fired.Add;
 
-        notificationService.Evaluate(MakeSnapshot(99, DateTimeOffset.UtcNow.AddHours(1)));
+        service.Evaluate(MakeSnapshot(100, DateTimeOffset.UtcNow.AddHours(1)));
 
         Assert.Empty(fired);
     }
@@ -84,17 +85,15 @@ public class NotificationServiceTests
     public void Evaluate_ResetsAtChangesAndUsageDrops_FiresResetNotification()
     {
         using var isolated = new IsolatedAppData();
-        var notificationService = new NotificationService(new SettingsService());
+        var service = new NotificationService(new SettingsService());
         var fired = new List<NotificationEvent>();
-        notificationService.NotificationRequested += fired.Add;
+        service.NotificationRequested += fired.Add;
 
-        notificationService.Evaluate(MakeSnapshot(65, DateTimeOffset.UtcNow.AddHours(1)));
+        service.Evaluate(MakeSnapshot(65, DateTimeOffset.UtcNow.AddHours(1)));
         fired.Clear();
+        service.Evaluate(MakeSnapshot(2, DateTimeOffset.UtcNow.AddHours(6)));
 
-        // New quota period: reset time moved forward, usage back near zero.
-        notificationService.Evaluate(MakeSnapshot(2, DateTimeOffset.UtcNow.AddHours(6)));
-
-        var reset = Assert.Single(fired, e => e.Title.Contains("reset"));
+        var reset = Assert.Single(fired, e => e.Title.Contains("reset", StringComparison.OrdinalIgnoreCase));
         Assert.Contains("has been reset", reset.Message);
         Assert.Contains("2%", reset.Message);
     }
@@ -103,63 +102,119 @@ public class NotificationServiceTests
     public void Evaluate_FirstSighting_DoesNotFireResetNotification()
     {
         using var isolated = new IsolatedAppData();
-        var notificationService = new NotificationService(new SettingsService());
+        var service = new NotificationService(new SettingsService());
         var fired = new List<NotificationEvent>();
-        notificationService.NotificationRequested += fired.Add;
+        service.NotificationRequested += fired.Add;
 
-        // App start / provider newly added: low usage, never seen before - not a reset.
-        notificationService.Evaluate(MakeSnapshot(3, DateTimeOffset.UtcNow.AddHours(2)));
+        service.Evaluate(MakeSnapshot(3, DateTimeOffset.UtcNow.AddHours(2)));
 
-        Assert.DoesNotContain(fired, e => e.Title.Contains("reset"));
+        Assert.Empty(fired);
     }
 
     [Fact]
     public void Evaluate_ResetsAtChangesButPriorUsageWasTrivial_NoResetNotification()
     {
         using var isolated = new IsolatedAppData();
-        var notificationService = new NotificationService(new SettingsService());
+        var service = new NotificationService(new SettingsService());
         var fired = new List<NotificationEvent>();
-        notificationService.NotificationRequested += fired.Add;
+        service.NotificationRequested += fired.Add;
 
-        notificationService.Evaluate(MakeSnapshot(4, DateTimeOffset.UtcNow.AddHours(1)));
-        notificationService.Evaluate(MakeSnapshot(1, DateTimeOffset.UtcNow.AddHours(6)));
+        service.Evaluate(MakeSnapshot(4, DateTimeOffset.UtcNow.AddHours(1)));
+        service.Evaluate(MakeSnapshot(1, DateTimeOffset.UtcNow.AddHours(6)));
 
-        Assert.DoesNotContain(fired, e => e.Title.Contains("reset"));
+        Assert.Empty(fired);
     }
 
     [Fact]
-    public void Evaluate_SharpUsageDropWithoutResetTimeChange_FiresResetNotification()
+    public void Evaluate_SharpUsageDropWithoutResetTimeChange_FiresResetOnlyOnce()
     {
         using var isolated = new IsolatedAppData();
-        var notificationService = new NotificationService(new SettingsService());
+        var service = new NotificationService(new SettingsService());
         var fired = new List<NotificationEvent>();
-        notificationService.NotificationRequested += fired.Add;
+        service.NotificationRequested += fired.Add;
 
-        // Some providers never report resets_at - a cliff-drop in usage is the only reset signal.
-        notificationService.Evaluate(MakeSnapshot(80, null));
-        fired.Clear();
-        notificationService.Evaluate(MakeSnapshot(5, null));
+        service.Evaluate(MakeSnapshot(80, null));
+        service.Evaluate(MakeSnapshot(5, null));
+        service.Evaluate(MakeSnapshot(5, null));
 
-        Assert.Single(fired, e => e.Title.Contains("reset"));
+        Assert.Single(fired, e => e.Title.Contains("reset", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
-    public void Evaluate_ThresholdsCanFireAgainAfterReset()
+    public void Evaluate_ResetAfterServiceRestart_DoesNotRepeatAndRearmsLimit()
     {
         using var isolated = new IsolatedAppData();
-        var notificationService = new NotificationService(new SettingsService());
+        var firstPeriod = DateTimeOffset.UtcNow.AddHours(1);
+        var secondPeriod = DateTimeOffset.UtcNow.AddHours(6);
+        var first = new NotificationService(new SettingsService());
+        first.Evaluate(MakeSnapshot(100, firstPeriod));
+
+        var resetService = new NotificationService(new SettingsService());
+        var resetEvents = new List<NotificationEvent>();
+        resetService.NotificationRequested += resetEvents.Add;
+        resetService.Evaluate(MakeSnapshot(2, secondPeriod));
+        Assert.Single(resetEvents, e => e.Title.Contains("reset", StringComparison.OrdinalIgnoreCase));
+
+        var restarted = new NotificationService(new SettingsService());
+        var restartedEvents = new List<NotificationEvent>();
+        restarted.NotificationRequested += restartedEvents.Add;
+        restarted.Evaluate(MakeSnapshot(2, secondPeriod));
+        Assert.Empty(restartedEvents);
+
+        restarted.Evaluate(MakeSnapshot(100, secondPeriod));
+        Assert.Single(restartedEvents, e => e.Message.Contains("reached 100%", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Evaluate_CorruptRecoveredState_BaselinesFullWindowWithoutNotification()
+    {
+        using var isolated = new IsolatedAppData();
+        File.WriteAllText(AppPaths.NotificationStateFile, "{broken");
+        var service = new NotificationService(new SettingsService());
         var fired = new List<NotificationEvent>();
-        notificationService.NotificationRequested += fired.Add;
+        service.NotificationRequested += fired.Add;
 
-        var firstWindow = DateTimeOffset.UtcNow.AddHours(1);
-        notificationService.Evaluate(MakeSnapshot(75, firstWindow)); // 70% threshold
-        fired.Clear();
+        service.Evaluate(MakeSnapshot(100, DateTimeOffset.UtcNow.AddHours(3)));
 
-        var secondWindow = DateTimeOffset.UtcNow.AddHours(6);
-        notificationService.Evaluate(MakeSnapshot(2, secondWindow));  // reset
-        notificationService.Evaluate(MakeSnapshot(75, secondWindow)); // 70% again, new period
+        Assert.Empty(fired);
+    }
 
-        Assert.Single(fired, e => e.Title.Contains("reset"));
-        Assert.Single(fired, e => e.Message.Contains("reached 70%"));
+    [Fact]
+    public void Evaluate_DurableWriteFails_DelaysEventUntilWriteSucceeds()
+    {
+        using var isolated = new IsolatedAppData();
+        var store = new ControllableStateStore();
+        var service = new NotificationService(new SettingsService(), store);
+        var fired = new List<NotificationEvent>();
+        service.NotificationRequested += fired.Add;
+        var resetsAt = DateTimeOffset.UtcNow.AddHours(3);
+
+        service.Evaluate(MakeSnapshot(100, resetsAt));
+        Assert.Empty(fired);
+
+        store.AllowSave = true;
+        service.Evaluate(MakeSnapshot(100, resetsAt));
+
+        Assert.Single(fired);
+    }
+
+    private sealed class ControllableStateStore : INotificationStateStore
+    {
+        public bool AllowSave { get; set; }
+
+        public NotificationStateDocument State { get; private set; } = new();
+
+        public NotificationStateLoadResult Load() => new(State.Clone());
+
+        public bool TrySave(NotificationStateDocument state)
+        {
+            if (!AllowSave)
+            {
+                return false;
+            }
+
+            State = state.Clone();
+            return true;
+        }
     }
 }

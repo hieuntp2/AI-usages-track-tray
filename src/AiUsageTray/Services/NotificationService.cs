@@ -5,35 +5,35 @@ namespace AiUsageTray.Services;
 public sealed record NotificationEvent(string Title, string Message);
 
 /// <summary>
-/// Decides when a quota notification should fire. Two kinds are produced, both deduplicated per
-/// provider+window so background refreshes can call <see cref="Evaluate"/> as often as they like:
-/// threshold notifications (usage climbed past 70/90/100%), and reset notifications (a new quota
-/// period started - either the window's reset time changed, or usage dropped sharply while it had
-/// been meaningfully consumed).
+/// Produces durable, at-most-once notifications when a quota window reaches 100% or genuinely
+/// resets. Delivery markers are persisted before subscribers are notified, so repeated refreshes
+/// and application restarts cannot replay the same event.
 /// </summary>
 public sealed class NotificationService
 {
-    /// <summary>Usage must have reached at least this much for a reset to be worth announcing.</summary>
+    private const decimal LimitReachedPercent = 100m;
     private const decimal ResetNotifyMinimumPriorUsedPercent = 10m;
-
-    /// <summary>Without a reset-time change, usage must fall by at least this much to count as a reset.</summary>
     private const decimal ResetNotifyMinimumDropPercent = 30m;
 
-    private sealed class WindowNotificationState
-    {
-        public DateTimeOffset? ResetsAt;
-        public decimal? LastUsedPercent;
-        public HashSet<int> NotifiedThresholds { get; } = new();
-    }
-
+    private readonly object _sync = new();
     private readonly SettingsService _settingsService;
-    private readonly Dictionary<string, WindowNotificationState> _states = new();
+    private readonly INotificationStateStore _stateStore;
+    private readonly List<NotificationEvent> _pendingEvents = new();
+    private NotificationStateDocument _state;
+    private bool _hasUnpersistedChanges;
 
     public event Action<NotificationEvent>? NotificationRequested;
 
     public NotificationService(SettingsService settingsService)
+        : this(settingsService, new NotificationStateStore())
+    {
+    }
+
+    internal NotificationService(SettingsService settingsService, INotificationStateStore stateStore)
     {
         _settingsService = settingsService;
+        _stateStore = stateStore;
+        _state = stateStore.Load().State;
     }
 
     public void Evaluate(UsageSnapshot snapshot)
@@ -44,72 +44,128 @@ public sealed class NotificationService
             return;
         }
 
-        foreach (var window in snapshot.Windows)
+        List<NotificationEvent> readyEvents;
+        lock (_sync)
         {
-            if (window.UsedPercent is not { } used)
+            foreach (var window in snapshot.Windows)
             {
-                continue;
-            }
-
-            var key = $"{snapshot.ProviderId}:{window.Id}";
-            if (!_states.TryGetValue(key, out var state) || state.ResetsAt != window.ResetsAt)
-            {
-                var previous = _states.GetValueOrDefault(key);
-                NotifyResetIfMeaningful(snapshot, window, previous, used);
-
-                state = new WindowNotificationState { ResetsAt = window.ResetsAt };
-                _states[key] = state;
-            }
-            else if (state.LastUsedPercent is { } lastUsed &&
-                     lastUsed >= ResetNotifyMinimumPriorUsedPercent &&
-                     lastUsed - used >= ResetNotifyMinimumDropPercent)
-            {
-                // Reset time didn't change (or the provider never reports one), but usage fell off
-                // a cliff - treat as a reset and start a fresh dedup window for thresholds too.
-                NotifyReset(snapshot, window, used);
-                state = new WindowNotificationState { ResetsAt = window.ResetsAt };
-                _states[key] = state;
-            }
-
-            state.LastUsedPercent = used;
-
-            foreach (var threshold in providerSettings.Notifications.Percentages.OrderBy(t => t))
-            {
-                if (used >= threshold && state.NotifiedThresholds.Add(threshold))
+                if (window.UsedPercent is not { } used)
                 {
-                    var resetText = FormatReset(window.ResetsAt);
-                    var message = $"{snapshot.ProviderName} {window.DisplayName.ToLowerInvariant()} reached {threshold}%.{(resetText is null ? "" : $" {resetText}")}";
-                    NotificationRequested?.Invoke(new NotificationEvent($"{snapshot.ProviderName} usage", message));
+                    continue;
                 }
+
+                EvaluateWindow(snapshot, window, used);
+            }
+
+            readyEvents = PersistAndTakePendingEvents();
+        }
+
+        foreach (var notificationEvent in readyEvents)
+        {
+            NotificationRequested?.Invoke(notificationEvent);
+        }
+    }
+
+    private void EvaluateWindow(UsageSnapshot snapshot, UsageWindow window, decimal used)
+    {
+        var key = $"{snapshot.ProviderId}:{window.Id}";
+        if (!_state.Windows.TryGetValue(key, out var state))
+        {
+            state = new NotificationWindowState
+            {
+                ResetsAt = window.ResetsAt,
+                LastUsedPercent = used,
+                LimitReachedNotified =
+                    _state.SuppressNotificationsForUnseenWindows && used >= LimitReachedPercent,
+            };
+            _state.Windows[key] = state;
+            _hasUnpersistedChanges = true;
+
+            if (!_state.SuppressNotificationsForUnseenWindows && used >= LimitReachedPercent)
+            {
+                QueueLimitNotification(snapshot, window, state);
+            }
+
+            return;
+        }
+
+        var resetTimeChanged = state.ResetsAt != window.ResetsAt;
+        var meaningfulTimedReset = resetTimeChanged &&
+                                   state.ResetsAt is not null &&
+                                   state.LastUsedPercent is { } priorTimedUsage &&
+                                   priorTimedUsage >= ResetNotifyMinimumPriorUsedPercent &&
+                                   used < priorTimedUsage;
+        var meaningfulCliffReset = !resetTimeChanged &&
+                                   state.LastUsedPercent is { } priorUsage &&
+                                   priorUsage >= ResetNotifyMinimumPriorUsedPercent &&
+                                   priorUsage - used >= ResetNotifyMinimumDropPercent;
+
+        if (meaningfulTimedReset || meaningfulCliffReset)
+        {
+            state = new NotificationWindowState
+            {
+                ResetsAt = window.ResetsAt,
+                LastUsedPercent = used,
+            };
+            _state.Windows[key] = state;
+            _hasUnpersistedChanges = true;
+            _pendingEvents.Add(CreateResetNotification(snapshot, window, used));
+        }
+        else
+        {
+            if (state.ResetsAt != window.ResetsAt)
+            {
+                state.ResetsAt = window.ResetsAt;
+                _hasUnpersistedChanges = true;
+            }
+
+            if (state.LastUsedPercent != used)
+            {
+                state.LastUsedPercent = used;
+                _hasUnpersistedChanges = true;
             }
         }
-    }
 
-    private void NotifyResetIfMeaningful(UsageSnapshot snapshot, Models.UsageWindow window, WindowNotificationState? previous, decimal currentUsed)
-    {
-        // Only announce when a period we actually watched ends: the old state must exist, have had
-        // real consumption, and the new reading must be lower - otherwise every first sighting of a
-        // window (app start, provider newly added) would produce a bogus "reset" balloon.
-        if (previous is { ResetsAt: not null, LastUsedPercent: { } lastUsed } &&
-            lastUsed >= ResetNotifyMinimumPriorUsedPercent &&
-            currentUsed < lastUsed)
+        if (used >= LimitReachedPercent && !state.LimitReachedNotified)
         {
-            NotifyReset(snapshot, window, currentUsed);
+            QueueLimitNotification(snapshot, window, state);
         }
     }
 
-    private void NotifyReset(UsageSnapshot snapshot, Models.UsageWindow window, decimal currentUsed)
+    private void QueueLimitNotification(
+        UsageSnapshot snapshot,
+        UsageWindow window,
+        NotificationWindowState state)
     {
-        var message = $"{snapshot.ProviderName} {window.DisplayName.ToLowerInvariant()} has been reset. Usage is now {currentUsed:0}%.";
-        NotificationRequested?.Invoke(new NotificationEvent($"{snapshot.ProviderName} usage reset", message));
+        state.LimitReachedNotified = true;
+        _hasUnpersistedChanges = true;
+
+        var resetText = FormatReset(window.ResetsAt);
+        var message =
+            $"{snapshot.ProviderName} {window.DisplayName.ToLowerInvariant()} reached 100%." +
+            (resetText is null ? string.Empty : $" {resetText}");
+        _pendingEvents.Add(new NotificationEvent($"{snapshot.ProviderName} usage", message));
     }
 
-    public void ResetProvider(string providerId)
+    private static NotificationEvent CreateResetNotification(
+        UsageSnapshot snapshot,
+        UsageWindow window,
+        decimal used) =>
+        new(
+            $"{snapshot.ProviderName} usage reset",
+            $"{snapshot.ProviderName} {window.DisplayName.ToLowerInvariant()} has been reset. Usage is now {used:0}%.");
+
+    private List<NotificationEvent> PersistAndTakePendingEvents()
     {
-        foreach (var key in _states.Keys.Where(k => k.StartsWith($"{providerId}:", StringComparison.Ordinal)).ToList())
+        if (!_hasUnpersistedChanges || !_stateStore.TrySave(_state.Clone()))
         {
-            _states.Remove(key);
+            return new List<NotificationEvent>();
         }
+
+        _hasUnpersistedChanges = false;
+        var readyEvents = _pendingEvents.ToList();
+        _pendingEvents.Clear();
+        return readyEvents;
     }
 
     private static string? FormatReset(DateTimeOffset? resetsAt)
